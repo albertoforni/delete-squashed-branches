@@ -1,0 +1,11 @@
+{
+  "emeraldwalk.runonsave": {
+    "commands": [
+      {
+        "match": ".v",
+        "isAsync": true,
+        "cmd": "v fmt -w ${file}"
+      },
+    ]
+  }
+}
