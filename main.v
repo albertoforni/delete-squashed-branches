@@ -2,12 +2,19 @@ module main
 
 import os
 import term
-import term.ui as tui
+import flag
 
-fn get_local_branches() ?[]string {
+fn get_local_branches(exclude []string) ?[]string {
 	result := os.execute('git branch')
 	if result.exit_code == 0 {
-		return result.output.split_into_lines().map(it.trim(' \n'))
+		local_branches := result.output.split_into_lines().map(it.trim(' \n'))
+		mut local_branches_to_check := []string{}
+		for local_branch in local_branches {
+			if local_branch !in exclude {
+				local_branches_to_check << local_branch
+			}
+		}
+		return local_branches_to_check
 	} else {
 		return error(result.output)
 	}
@@ -51,17 +58,23 @@ fn validation_of_squash_merged_branch(main string, temp_tree string) ?bool {
 }
 
 fn check_if_branch_is_squashed(branch string) bool {
-	common_parent := find_common_parent('master', branch.trim(' \n')) or { panic(err) }
+	common_parent := find_common_parent('master', branch.trim(' \n')) or { panic(err.msg) }
 
 	temp_squash_commit := create_a_temporary_squashed_commit(branch, common_parent.trim(' \n')) or {
-		panic(err)
+		panic(err.msg)
 	}
 
 	already_merged_via_squash := validation_of_squash_merged_branch('master', temp_squash_commit) or {
-		panic(err)
+		panic(err.msg)
 	}
 
 	return if already_merged_via_squash { true } else { false }
+}
+
+fn remove_local_branch(branch string) ?bool {
+	result := os.execute('git branch -D $branch')
+
+	return if result.exit_code == 0 { true } else { error(result.output) }
 }
 
 struct SquashedBranch {
@@ -69,28 +82,51 @@ struct SquashedBranch {
 	selected bool
 }
 
-fn main_() []SquashedBranch {
-	local_branches := get_local_branches() or {
-		panic(err)
-		// TODO exit with non-zero code
+const (
+	tool_version     = '0.0.1'
+	tool_description = 'Finds local branches that have been merged into the main branch via squash commit'
+)
+
+fn main() {
+	mut fp := flag.new_flag_parser(os.args)
+	fp.application('delete_squashed_branches')
+	fp.version(tool_version)
+	fp.limit_free_args(0, 0)
+	fp.description(tool_description)
+	fp.skip_executable()
+	exclude := fp.string_multi('exclude', `e`, '--exclude "my_branch_1, my_branch_2"')
+	help := fp.bool('help', `h`, false, 'print usage')
+	if help {
+		println(fp.usage())
+		exit(0)
+	}
+	fp.finalize() or {
+		println(fp.usage())
+		exit(1)
+	}
+
+	local_branches := get_local_branches(exclude) or {
+		println(err.msg)
+		exit(1)
 	}
 
 	// TODO
 	// find main branch
 	// get remote
 
-	remote_branches := get_remote_branches() or { panic(err) }
+	remote_branches := get_remote_branches() or { panic(err.msg) }
 
 	local_branches_in_remote := distinct_branches(local_branches, remote_branches)
-	println(term.colorize(term.white, 'Local branches found in remote'))
-	println(term.colorize(term.white, 'Tab to move'))
-	println(term.colorize(term.white, 'Space to toggle'))
-	println(term.colorize(term.white, 'Enter to delete the selected branches'))
-	println(term.colorize(term.white, 'Esc to exit without making any change'))
 
 	squahed_branches := local_branches_in_remote.filter(fn (branch string) bool {
 		return if check_if_branch_is_squashed(branch) { true } else { false }
 	})
+
+	if squahed_branches.len == 0 {
+		println('There are no squashed branches to delete. Good for you!')
+		print('bye bye')
+		exit(0)
+	}
 
 	mut selected_squashed_branches := []SquashedBranch{}
 
@@ -101,71 +137,27 @@ fn main_() []SquashedBranch {
 		}
 	}
 
-	mut cursor := 0
-	for i, branch in selected_squashed_branches {
-		println(if cursor == i { '->' } else { '  ' } +
-			if branch.selected { ' [X] ' } else { ' [ ] ' } + '$branch.name')
+	for branch in selected_squashed_branches {
+		println(if branch.selected { '[X] ' } else { '[ ] ' } + '$branch.name')
 	}
 
-	return selected_squashed_branches
-}
-
-struct App {
-mut:
-	tui               &tui.Context = 0
-	squashed_branches []SquashedBranch
-	cursor            int
-}
-
-fn init(x voidptr) {
-	mut app := &App(x)
-	app.squashed_branches = main_()
-}
-
-fn event(e &tui.Event, x voidptr) {
-	mut app := &App(x)
-	match e.typ {
-		.key_down {
-			match e.code {
-				.escape {
-					exit(0)
-				}
-				.tab {
-					cursor := if e.modifiers == .shift { app.cursor - 1 } else { app.cursor + 1 }
-					if cursor < 0 {
-						app.cursor = app.squashed_branches.len - 1
-					} else if cursor == app.squashed_branches.len {
-						app.cursor = 0
-					} else {
-						app.cursor = cursor
+	println(term.colorize(term.red, '\nAbove the list of the local branches, not in remote that have been merged into the main branch\n'))
+	println(term.colorize(term.white, 'Rerun the comand with --exclude "my_branch_1,my_branch_2" to prevent those local branches from being deleted\n'))
+	for {
+		input := os.input(term.colorize(term.white, 'Type "delete" to continue with the deletion: '))
+		if input == 'delete' {
+			println('')
+			for branch in selected_squashed_branches {
+				if branch.selected {
+					remove_local_branch(branch.name) or {
+						println(term.colorize(term.red, 'Error deleting branch $branch.name: $err'))
+						continue
 					}
+					println(term.colorize(term.green, '$branch.name deleted'))
 				}
-				else {}
 			}
+			break
 		}
-		else {}
 	}
+	println('bye bye')
 }
-
-fn frame(x voidptr) {
-	mut app := &App(x)
-
-	app.tui.clear()
-	for i, branch in app.squashed_branches {
-		app.tui.set_color(r: 255, g: 255, b: 255)
-		app.tui.draw_text(0, i, if app.cursor == i { '->' } else { '  ' } +
-			if branch.selected { ' [X] ' } else { ' [ ] ' } + '$branch.name')
-	}
-	app.tui.reset()
-	app.tui.flush()
-}
-
-mut app := &App{}
-app.tui = tui.init(
-	user_data: app
-	init_fn: init
-	event_fn: event
-	frame_fn: frame
-	hide_cursor: true
-)
-app.tui.run() ?
